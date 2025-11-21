@@ -1,0 +1,27 @@
+{
+    "mode": 3,
+    "dpi": 300,
+    "parallel": true,
+    "optimize": true,
+    "output_format": "png",
+    "target_numbers": "",
+    "extract_tables": true,
+    "model_path": "doclayout_yolo_docstructbench_imgsz1024.onnx",
+    "imgsz": 1024,
+    "conf": 0.3,
+    "table_min_conf": 0.25,
+    "padding": 0,
+    "output_dir": "output",
+    "window_width": 1010,
+    "window_height": 818,
+    "input_path": "/Users/taoz/Documents/software/PDF2PNG/Deep-Learning-Based_Inverse-Designed_Millimeter-Wave_Passives_and_Power_Amplifiers.pdf",
+    "mode_index": 0,
+    "mode_text": "智能解析 (mode 3)",
+    "auto_output_dir": true,
+    "optimize_m3": true,
+    "splitter_sizes": [
+        711,
+        300
+    ],
+    "font_size": 14
+}

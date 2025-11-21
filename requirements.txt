@@ -1,0 +1,7 @@
+onnxruntime
+onnx
+PyMuPDF
+numpy
+opencv-python
+Pillow
+pyside6
