@@ -14,7 +14,6 @@ def get_default_settings():
         "output_format": "png",
         "target_numbers": "",
         "extract_tables": True,
-        "model_path": "doclayout_yolo_docstructbench_imgsz1024.onnx",
         "imgsz": 1024,
         "conf": 0.4,
         "table_min_conf": 0.25,

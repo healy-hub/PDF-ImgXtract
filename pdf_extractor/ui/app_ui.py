@@ -2,6 +2,7 @@
 import os
 import sys
 import re
+import time
 from PySide6.QtCore import Qt, Signal, QThread, QSize, QByteArray
 from PySide6.QtGui import QIcon, QPixmap, QPainter
 from PySide6.QtWidgets import (
@@ -219,10 +220,9 @@ class MainWindow(QWidget):
 
     def dropEvent(self, event):
         self.file_list_widget.setStyleSheet(self.original_list_style)
-        if self.main_content_widget.geometry().contains(event.pos().toPoint()):
-             files = [url.toLocalFile() for url in event.mimeData().urls()]
-             self._add_files_to_list(files)
-        event.accept()
+        files = [url.toLocalFile() for url in event.mimeData().urls()]
+        self._add_files_to_list(files)
+        event.acceptProposedAction()
 
     def _start_processing(self):
         if self.file_list_widget.count() == 0: return self._show_error("请先添加至少一个 PDF 文件。")

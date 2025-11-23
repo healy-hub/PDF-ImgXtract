@@ -184,10 +184,10 @@ class AppLogic(QObject):
         return f"成功转换并保存了 {num_pages} 个页面。"
 
     def _ai_extract_mode_3(self, s: Dict) -> str:
-        # Build a robust path to the default model
+        # Build a robust, absolute path to the default model
         script_dir = os.path.dirname(os.path.abspath(__file__))
         project_root = os.path.dirname(script_dir)
-        default_model_path = os.path.join(project_root, '..', 'models', 'doclayout_yolo_docstructbench_imgsz1024.onnx')
+        default_model_path = os.path.join(project_root, 'models', 'doclayout_yolo_docstructbench_imgsz1024.onnx')
         
         model_path = s.get("model_path") or default_model_path
         
