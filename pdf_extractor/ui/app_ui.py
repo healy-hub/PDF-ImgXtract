@@ -58,6 +58,9 @@ class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("PDF 内容提取器 Pro")
+        app_icon_path = os.path.join(os.path.dirname(__file__), "assets", "app.png")
+        if os.path.exists(app_icon_path):
+            self.setWindowIcon(QIcon(app_icon_path))
         self.settings = settings.load_settings()
         self.setAcceptDrops(True)
         self.resize(self.settings.get("window_width", 900), self.settings.get("window_height", 650))
