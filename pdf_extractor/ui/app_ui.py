@@ -3,8 +3,8 @@ import os
 import sys
 import re
 import time
-from PySide6.QtCore import Qt, Signal, QThread, QSize, QByteArray
-from PySide6.QtGui import QIcon, QPixmap, QPainter
+from PySide6.QtCore import Qt, Signal, QThread, QSize, QByteArray, QUrl
+from PySide6.QtGui import QIcon, QPixmap, QPainter, QFont, QDesktopServices
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QFileDialog, QFrame, QProgressBar, QRadioButton, QSpinBox, QDoubleSpinBox,
@@ -25,6 +25,8 @@ MAX_FONT_SIZE = 18
 # --- SVG Icons (Base64 Encoded) ---
 ICON_INFO = "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9ImN1cnJlbnRDb2xvciIgc3Ryb2tlLXdpZHRoPSIyIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxjaXJjbGUgY3g9IjEyIiBjeT0iMTIiIHI9IjEwIi8+PHBhdGggZD0ibTEyIDE2djBtMC04djQiLz48L3N2Zz4="
 ICON_DELETE = "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9ImN1cnJlbnRDb2xvciIgc3Ryb2tlLXdpZHRoPSIyIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxsaW5lIHgxPSIxOCIgeDI9IjYiIHkxPSI2IiB5Mj0iMTgiLz48bGluZSB4MT0iNiIgeDI9IjE4IiB5MT0iNiIgeTI9IjE4Ii8+PC9zdmc+Cg=="
+ICON_FOLDER = "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9ImN1cnJlbnRDb2xvciIgc3Ryb2tlLXdpZHRoPSIyIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxwYXRoIGQ9Ik0yMiAxOVh2LTlhMiAyIDAgMCAwLTItMmgtNmwtMi0ySDRhMiAyIDAgMCAwLTIgMnYxMmEyIDAgMCAwIDIgMmgxNmEyIDAgMCAwIDItMnoiLz48L3N2Zz4="
+ICON_PDF = "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9ImN1cnJlbnRDb2xvciIgc3Ryb2tlLXdpZHRoPSIyIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxwYXRoIGQ9Ik0xMyAySDZhMiAyIDAgMCAwLTIgMnYxNmEyIDAgMCAwIDIgMmgxMmEyIDAgMCAwIDItMlY5eiI+PC9wYXRoPjxwb2x5bGluZSBwb2ludHM9IjEzIDIgMTMgOSAyMCA5Ij48L3BvbHlsaW5lPjwvc3ZnPg=="
 
 def create_icon(base64_svg, color="#555555"):
     svg_data = QByteArray.fromBase64(base64_svg.encode('utf-8'))
@@ -44,10 +46,18 @@ class FileListItemWidget(QWidget):
         super().__init__(parent)
         self.list_item = list_item
         layout = QHBoxLayout(self); layout.setContentsMargins(5, 5, 5, 5); layout.setSpacing(10)
-        self.label = QLabel(text); self.label.setWordWrap(True)
+        
+        self.icon_label = QLabel()
+        self.icon_label.setPixmap(create_icon(ICON_PDF, "#FF3B30").pixmap(24, 24))
+        self.icon_label.setFixedSize(24, 24)
+        
+        self.label = QLabel(text)
+        self.label.setToolTip(text)
         self.delete_button = QPushButton(); self.delete_button.setIcon(create_icon(ICON_DELETE, "#888888"))
         self.delete_button.setFixedSize(24, 24); self.delete_button.setObjectName("deleteButton")
         self.delete_button.clicked.connect(self._on_delete)
+        
+        layout.addWidget(self.icon_label)
         layout.addWidget(self.label, 1); layout.addWidget(self.delete_button)
     def _on_delete(self): self.itemDeleted.emit(self.list_item)
 
@@ -67,6 +77,7 @@ class MainWindow(QWidget):
         self.worker_thread = None; self.logic = None; self.current_file_index = 0
         self.file_list = []; self.batch_start_time = 0
         self.total_images_extracted = 0; self.total_tables_extracted = 0
+        self.last_output_dir = None
         self._init_ui()
         self._connect_signals()
         self._load_and_apply_settings()
@@ -112,7 +123,9 @@ class MainWindow(QWidget):
         format_radio_layout = QHBoxLayout(); format_radio_layout.addWidget(self.png_radio); format_radio_layout.addWidget(self.webp_radio); format_radio_layout.addStretch(); general_layout.addRow("输出格式:", format_radio_layout)
         self.optimize_webp_checkbox = QCheckBox("优化 WebP 图像"); general_layout.addRow("", self.optimize_webp_checkbox)
         self.font_size_spinbox = QSpinBox(); self.font_size_spinbox.setRange(MIN_FONT_SIZE, MAX_FONT_SIZE); self.font_size_spinbox.setSuffix(" px"); general_layout.addRow("字体大小:", self.font_size_spinbox)
+        self.page_range_lineedit = QLineEdit(); self.page_range_lineedit.setPlaceholderText("例: 1,3-5 (留空为全部)"); general_layout.addRow("处理页码:", self.page_range_lineedit)
         self.numbers_lineedit = QLineEdit(); self.numbers_lineedit.setPlaceholderText("例: 1,3,5-8 (留空为全部)"); general_layout.addRow("指定序号:", self.numbers_lineedit)
+        self.filename_pattern_lineedit = QLineEdit(); self.filename_pattern_lineedit.setPlaceholderText("留空则自动命名"); self.filename_pattern_lineedit.setToolTip("留空将自动使用默认命名。详情请查看关于页面。"); general_layout.addRow("自定义命名:", self.filename_pattern_lineedit)
         self.output_dir_lineedit = QLineEdit(); self.browse_button = QPushButton("浏览"); output_dir_layout = QHBoxLayout(); output_dir_layout.addWidget(self.output_dir_lineedit); output_dir_layout.addWidget(self.browse_button); general_layout.addRow("输出目录:", output_dir_layout)
         self.auto_output_dir_checkbox = QCheckBox("为每个PDF创建独立文件夹"); self.auto_output_dir_checkbox.setChecked(True); general_layout.addRow("", self.auto_output_dir_checkbox); settings_layout.addWidget(general_group)
         self.mode3_group_box = QGroupBox("智能解析设置"); mode3_layout = QFormLayout(self.mode3_group_box); mode3_layout.setSpacing(10)
@@ -132,8 +145,26 @@ class MainWindow(QWidget):
         status_bar_layout = QHBoxLayout(status_bar_widget); status_bar_layout.setContentsMargins(20, 8, 20, 8)
         self.status_label = QLabel("欢迎使用！"); self.status_label.setObjectName("statusLabel")
         self.progress_bar = QProgressBar(); self.progress_bar.setValue(0); self.progress_bar.setTextVisible(False)
-        status_bar_layout.addWidget(self.status_label, 1); status_bar_layout.addWidget(self.progress_bar); self.progress_bar.hide()
+        
+        self.open_dir_button = QPushButton(); self.open_dir_button.setIcon(create_icon(ICON_FOLDER, "#555555"))
+        self.open_dir_button.setFixedSize(28, 28); self.open_dir_button.setToolTip("打开输出目录")
+        self.open_dir_button.clicked.connect(self._open_output_directory)
+        self.open_dir_button.setObjectName("iconButton")
+        
+        status_bar_layout.addWidget(self.status_label, 1); status_bar_layout.addWidget(self.open_dir_button); status_bar_layout.addWidget(self.progress_bar); self.progress_bar.hide()
         return status_bar_widget
+
+    def _open_output_directory(self):
+        # Priority: Last used dir > UI set dir
+        path_to_open = self.last_output_dir if self.last_output_dir else self.output_dir_lineedit.text()
+        
+        if path_to_open and os.path.exists(path_to_open):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path_to_open))
+        elif self.output_dir_lineedit.text() and os.path.exists(self.output_dir_lineedit.text()):
+             # Fallback to UI dir if last_output_dir is set but deleted/invalid
+             QDesktopServices.openUrl(QUrl.fromLocalFile(self.output_dir_lineedit.text()))
+        else:
+            self._show_error(f"目录不存在: {path_to_open}")
 
     def _connect_signals(self):
         self.add_file_button.clicked.connect(self._select_pdf_files); self.add_folder_button.clicked.connect(self._select_folder)
@@ -154,7 +185,17 @@ class MainWindow(QWidget):
         self.dpi_spinbox_m3.setValue(self.settings.get("dpi", 300)); self.conf_spinbox.setValue(self.settings.get("conf", 0.4))
         self.table_conf_spinbox.setValue(self.settings.get("table_min_conf", 0.25))
         self.padding_spinbox.setValue(self.settings.get("padding", 10)); self.extract_tables_checkbox.setChecked(self.settings.get("extract_tables", True))
-        self.numbers_lineedit.setText(self.settings.get("target_numbers", "")); self._update_ui_for_mode(); self._update_optimize_visibility()
+        self.numbers_lineedit.setText(self.settings.get("target_numbers", ""))
+        self.page_range_lineedit.setText(self.settings.get("page_range", ""))
+        
+        # Handle old default for filename_pattern
+        filename_pattern_value = self.settings.get("filename_pattern", "")
+        if filename_pattern_value == "{type}{id}":
+            self.filename_pattern_lineedit.setText("")
+        else:
+            self.filename_pattern_lineedit.setText(filename_pattern_value)
+            
+        self._update_ui_for_mode(); self._update_optimize_visibility()
 
     def _gather_current_settings(self):
         if self.mode1_radio.isChecked(): mode_text = "仅提取图片 (mode 1)"
@@ -165,7 +206,7 @@ class MainWindow(QWidget):
             "auto_output_dir": self.auto_output_dir_checkbox.isChecked(), "output_dir": self.output_dir_lineedit.text(),
             "dpi": self.dpi_spinbox_m3.value(), "conf": self.conf_spinbox.value(), "table_min_conf": self.table_conf_spinbox.value(),
             "padding": self.padding_spinbox.value(), "extract_tables": self.extract_tables_checkbox.isChecked(),
-            "target_numbers": self.numbers_lineedit.text(), "optimize_m3": self.optimize_webp_checkbox.isChecked(),
+            "target_numbers": self.numbers_lineedit.text(), "page_range": self.page_range_lineedit.text(), "filename_pattern": self.filename_pattern_lineedit.text(), "optimize_m3": self.optimize_webp_checkbox.isChecked(),
             "font_size": self.font_size_spinbox.value(),
             "imgsz": 1024, "parallel": True, "optimize": self.optimize_webp_checkbox.isChecked()
         })
@@ -185,8 +226,14 @@ class MainWindow(QWidget):
         for path in paths:
             if path not in current_files:
                 list_item = QListWidgetItem(self.file_list_widget); list_item.setData(Qt.UserRole, path)
-                item_widget = FileListItemWidget(os.path.basename(path), list_item); item_widget.itemDeleted.connect(self._remove_list_item)
-                list_item.setSizeHint(item_widget.sizeHint()); self.file_list_widget.addItem(list_item)
+                item_widget = FileListItemWidget(os.path.basename(path), list_item, self.file_list_widget); item_widget.itemDeleted.connect(self._remove_list_item)
+                
+                # Ensure the widget has the correct style properties before calculating size
+                item_widget.ensurePolished()
+                
+                sz = item_widget.sizeHint()
+                sz.setHeight(sz.height() + 8)
+                list_item.setSizeHint(sz)
                 self.file_list_widget.setItemWidget(list_item, item_widget); added_count += 1
         if added_count > 0: self.start_button.setEnabled(True); self.status_label.setText(f"已添加 {self.file_list_widget.count()} 个文件到处理队列。")
         self._update_list_placeholder()
@@ -253,6 +300,9 @@ class MainWindow(QWidget):
         if self.auto_output_dir_checkbox.isChecked():
             pdf_dir, _ = os.path.split(pdf_path); pdf_basename, _ = os.path.splitext(file_name)
             current_settings["output_dir"] = os.path.join(pdf_dir, pdf_basename)
+        
+        self.last_output_dir = current_settings["output_dir"]
+            
         self.logic = AppLogic(); self.worker_thread = QThread(); self.logic.moveToThread(self.worker_thread)
         self.worker_thread.started.connect(lambda: self.logic.run_extraction(current_settings))
         self.logic.progress_updated.connect(self._update_progress); self.logic.status_changed.connect(self._update_status_for_file)
@@ -279,7 +329,35 @@ class MainWindow(QWidget):
         self.findChild(QSplitter).widget(1).setEnabled(enabled) # Sidebar
         self.start_button.setEnabled(enabled and self.file_list_widget.count() > 0)
 
-    def _show_about_dialog(self): QMessageBox.about(self, "关于本软件", """<h3>PDF 内容提取器 Pro v2.3</h3>...""")
+    def _show_about_dialog(self):
+        QMessageBox.about(self, "关于本软件", """
+            <h3>PDF 内容提取器 Pro v2.4</h3>
+            <p>一款强大的 PDF 图像与表格提取工具，基于 MinerU 核心技术。</p>
+            <hr>
+            <b>主要功能：</b>
+            <ul>
+            <li><b>智能解析 (Mode 3)</b>：利用 AI 模型自动识别并精确裁剪 PDF 中的图片和表格区域。</li>
+            <li><b>仅提取图片 (Mode 1)</b>：快速提取 PDF 文件中嵌入的原生图片对象。</li>
+            <li><b>全页转图 (Mode 2)</b>：将 PDF 的每一页完整渲染为图片。</li>
+            </ul>
+            <b>自定义命名规则：</b>
+            <p>在“自定义命名”框中输入内容可修改输出文件名的格式。</p>
+            <ul>
+            <li><b>自动模式</b>：留空不填。软件自动命名为 <i>fig1.png, table1.png</i> 等。</li>
+            <li><b>前缀模式</b>：输入 "MyImage"，软件自动生成 <i>MyImage1.png, MyImage2.png</i>。</li>
+            <li><b>高级模式</b>：使用变量完全自定义。
+                <ul>
+                <li><code>{type}</code>：类型 (fig 或 table)</li>
+                <li><code>{id}</code>：当前对象的序号</li>
+                <li><code>{page}</code>：所在的 PDF 页码</li>
+                </ul>
+                示例：输入 <code>data_p{page}_{id}</code> <br>
+                结果：<i>data_p1_1.png, data_p5_2.png</i>
+            </li>
+            </ul>
+            <hr>
+            <p>版权所有 &copy; 2025</p>
+            """)
     def _show_error(self, message): QMessageBox.critical(self, "错误", message)
 
     def closeEvent(self, event):

@@ -16,7 +16,7 @@
 
 1. **克隆仓库**
    ```bash
-   git clone https://github.com/healy-hub/PDF-ImgXtract.git
+   git clone <your-repository-url>
    cd PDF2PNG
    ```
 

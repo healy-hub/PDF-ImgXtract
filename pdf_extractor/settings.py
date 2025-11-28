@@ -12,15 +12,17 @@ def get_default_settings():
         "parallel": True,
         "optimize": False,
         "output_format": "png",
+        "filename_pattern": "",
         "target_numbers": "",
+        "page_range": "",
         "extract_tables": True,
         "imgsz": 1024,
-        "conf": 0.4,
+        "conf": 0.3,
         "table_min_conf": 0.25,
-        "padding": 10,
+        "padding": 0,
         "output_dir": "output",
-        "window_width": 450,
-        "window_height": 600
+        "window_width": 1024,
+        "window_height": 766
     }
 
 def load_settings():

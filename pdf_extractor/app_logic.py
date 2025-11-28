@@ -41,15 +41,35 @@ class AppLogic(QObject):
             self.status_changed.emit("正在打开 PDF 文件...")
             self.progress_updated.emit(2)
             self.doc = fitz.open(pdf_path)
-            self.status_changed.emit(f"PDF 文件已打开，共 {len(self.doc)} 页。")
+            num_total_pages = len(self.doc)
+
+            # Parse page range
+            page_range_str = settings.get("page_range", "")
+            selected_page_numbers = self._parse_number_ranges(page_range_str) # Returns 1-based page numbers
+
+            page_indices_to_process = [] # 0-based indices
+            if selected_page_numbers:
+                for p_num in sorted(selected_page_numbers):
+                    if 1 <= p_num <= num_total_pages:
+                        page_indices_to_process.append(p_num - 1) # Convert to 0-based index
+            else:
+                page_indices_to_process = list(range(num_total_pages)) # Process all pages if no range specified
+
+            num_pages_to_process = len(page_indices_to_process)
+            if num_pages_to_process == 0:
+                self.status_changed.emit("没有找到需要处理的页面。")
+                self.processing_finished.emit("任务完成：没有找到需要处理的页面。")
+                return # Early exit
+
+            self.status_changed.emit(f"PDF 文件已打开，共 {num_total_pages} 页。将处理 {num_pages_to_process} 页。")
             self.progress_updated.emit(5) # 5% for initial setup
 
             if "mode 1" in mode_text:
-                result = self._extract_mode_1(settings)
+                result = self._extract_mode_1(settings, page_indices_to_process)
             elif "mode 2" in mode_text:
-                result = self._convert_mode_2(settings)
+                result = self._convert_mode_2(settings, page_indices_to_process)
             else: # mode 3 is default
-                result = self._ai_extract_mode_3(settings)
+                result = self._ai_extract_mode_3(settings, page_indices_to_process)
 
             self.status_changed.emit("任务完成，正在清理...")
             self.progress_updated.emit(98) # 98% for final cleanup
@@ -84,16 +104,32 @@ class AppLogic(QObject):
                 self.status_changed.emit(f"[警告] 无法解析序号 '{part}'，将予以忽略。")
         return selected_numbers
 
-    def _extract_mode_1(self, s: Dict) -> str:
+    def _generate_filename(self, pattern: str, context: Dict) -> str:
+        """根据模式生成文件名"""
+        try:
+            if not pattern:
+                pattern = "{type}{id}"
+            elif "{" not in pattern and "}" not in pattern:
+                # If no placeholders are used, treat as a prefix and append ID automatically
+                pattern = f"{pattern}{{id}}"
+                
+            filename = pattern.format(**context)
+            # 简单的文件名清理
+            return "".join(c for c in filename if c.isalnum() or c in (' ', '.', '_', '-')).strip()
+        except Exception as e:
+            print(f"Filename generation error: {e}")
+            return f"{context.get('type', 'obj')}{context.get('id', 0)}"
+
+    def _extract_mode_1(self, s: Dict, page_indices_to_process: List[int]) -> str:
         self.status_changed.emit("[模式1] 扫描PDF以提取嵌入的图片对象...")
         target_numbers = self._parse_number_ranges(s["target_numbers"])
         
         all_potential_images = []
-        num_pages = len(self.doc)
-        for page_index in range(num_pages):
-            self.status_changed.emit(f"扫描第 {page_index + 1}/{num_pages} 页...")
+        num_processed_pages = len(page_indices_to_process)
+        for i, page_index in enumerate(page_indices_to_process):
+            self.status_changed.emit(f"扫描第 {i + 1}/{num_processed_pages} 页 (PDF页码: {page_index + 1})...")
             # Progress from 5% to 15% for scanning
-            self.progress_updated.emit(int(5 + 10 * (page_index + 1) / num_pages))
+            self.progress_updated.emit(int(5 + 10 * (i + 1) / num_processed_pages))
             for img_info in self.doc.get_page_images(page_index, full=True):
                 rects = self.doc.get_page_image_rects(page_index, img_info)
                 if rects:
@@ -106,6 +142,7 @@ class AppLogic(QObject):
 
         saved_counter = 0
         out_format = s["output_format"]
+        pattern = s.get("filename_pattern") # Let _generate_filename handle defaults
         total_images_to_save = len(all_potential_images)
         for idx, img_info in enumerate(all_potential_images, 1):
             if target_numbers and idx not in target_numbers:
@@ -122,7 +159,12 @@ class AppLogic(QObject):
                 if img.mode in ('CMYK', 'P'):
                     img = img.convert('RGB')
 
-                output_path = os.path.join(s["output_dir"], f"fig{idx}.{out_format}")
+                # Generate filename
+                fname = self._generate_filename(pattern, {"type": "fig", "id": idx, "page": img_info["page"] + 1, "ext": out_format})
+                if not fname.lower().endswith(f".{out_format}"):
+                    fname += f".{out_format}"
+                
+                output_path = os.path.join(s["output_dir"], fname)
                 
                 save_options = {}
                 if out_format == 'webp':
@@ -131,7 +173,7 @@ class AppLogic(QObject):
                 img.save(output_path, format=out_format.upper(), **save_options)
                 
                 saved_counter += 1
-                self.status_changed.emit(f"已保存图片: fig{idx}.{out_format}")
+                self.status_changed.emit(f"已保存图片: {fname}")
                 # Progress from 15% to 90% for saving
                 self.progress_updated.emit(int(15 + 75 * (idx + 1) / total_images_to_save))
             except Exception as e:
@@ -160,30 +202,34 @@ class AppLogic(QObject):
         except Exception as e:
             return f"错误：处理页面 {page_index + 1} 失败 - {e}"
 
-    def _convert_mode_2(self, s: Dict) -> str:
+    def _convert_mode_2(self, s: Dict, page_indices_to_process: List[int]) -> str:
         self.status_changed.emit(f"[模式2] 开始将PDF页面转换为 {s['output_format'].upper()}...")
-        num_pages = len(self.doc)
         
+        num_pages_to_process = len(page_indices_to_process)
+        
+        if num_pages_to_process == 0:
+            return "没有页面需要转换。"
+
         if s["parallel"]:
-            num_cores = min(os.cpu_count() or 1, 8, num_pages)
+            num_cores = min(os.cpu_count() or 1, 8, num_pages_to_process)
             self.status_changed.emit(f"运行模式: 并行 (使用 {num_cores} 个核心)")
             with concurrent.futures.ProcessPoolExecutor(max_workers=num_cores) as executor:
-                futures = [executor.submit(self._render_page_worker, i, s["input_path"], s["output_dir"], s["dpi"], s["optimize"], s["output_format"]) for i in range(num_pages)]
+                futures = [executor.submit(self._render_page_worker, p_idx, s["input_path"], s["output_dir"], s["dpi"], s["optimize"], s["output_format"]) for p_idx in page_indices_to_process]
                 for i, future in enumerate(concurrent.futures.as_completed(futures)):
                     self.status_changed.emit(future.result())
                     # Progress from 10% to 90% for rendering
-                    self.progress_updated.emit(int(10 + 80 * (i + 1) / num_pages))
+                    self.progress_updated.emit(int(10 + 80 * (i + 1) / num_pages_to_process))
         else:
             self.status_changed.emit("运行模式: 单线程")
-            for i in range(num_pages):
-                result = self._render_page_worker(i, s["input_path"], s["output_dir"], s["dpi"], s["optimize"], s["output_format"])
+            for i, p_idx in enumerate(page_indices_to_process):
+                result = self._render_page_worker(p_idx, s["input_path"], s["output_dir"], s["dpi"], s["optimize"], s["output_format"])
                 self.status_changed.emit(result)
                 # Progress from 10% to 90% for rendering
-                self.progress_updated.emit(int(10 + 80 * (i + 1) / num_pages))
+                self.progress_updated.emit(int(10 + 80 * (i + 1) / num_pages_to_process))
 
-        return f"成功转换并保存了 {num_pages} 个页面。"
+        return f"成功转换并保存了 {num_pages_to_process} 个页面。"
 
-    def _ai_extract_mode_3(self, s: Dict) -> str:
+    def _ai_extract_mode_3(self, s: Dict, page_indices_to_process: List[int]) -> str:
         # Build a robust, absolute path to the default model
         script_dir = os.path.dirname(os.path.abspath(__file__))
         project_root = os.path.dirname(script_dir)
@@ -210,17 +256,18 @@ class AppLogic(QObject):
         input_name = session.get_inputs()[0].name
         output_name = session.get_outputs()[0].name
 
+        num_pages_to_process = len(page_indices_to_process)
         self.status_changed.emit(f"[模式3] 运行模式: CPU")
-        self.status_changed.emit(f"正在对 {len(self.doc)} 个页面进行AI推理...")
+        self.status_changed.emit(f"正在对 {num_pages_to_process} 个页面进行AI推理...")
 
         TABLE_MIN_CONF = s["table_min_conf"]
         TABLE_MIN_ASPECT_RATIO, TABLE_MAX_ASPECT_RATIO, TABLE_MIN_AREA_RATIO = 0.3, 3.0, 0.01
 
         figures_by_page, tables_by_page = {}, {}
 
-        num_pages = len(self.doc)
-        for page_num, page in enumerate(self.doc):
-            self.status_changed.emit(f"正在处理第 {page_num + 1}/{num_pages} 页...")
+        for i, page_num_0based in enumerate(page_indices_to_process):
+            page = self.doc[page_num_0based]
+            self.status_changed.emit(f"正在处理第 {i + 1}/{num_pages_to_process} 页 (PDF页码: {page_num_0based + 1})...")
 
             pix = page.get_pixmap(dpi=100)
             img_cv = cv2.cvtColor(np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, pix.n), cv2.COLOR_RGBA2BGR if pix.n == 4 else cv2.COLOR_RGB2BGR)
@@ -261,8 +308,8 @@ class AppLogic(QObject):
 
             
             page_figs, page_tbls = [], []
-            for i in kept_indices:
-                det = raw_detections[i]
+            for ii in kept_indices:
+                det = raw_detections[ii]
                 confidence, class_id = det[4], int(det[5])
                 cls_name = class_names.get(class_id, '').lower()
                 is_figure = cls_name == 'figure'
@@ -290,15 +337,15 @@ class AppLogic(QObject):
                     scaled_box[2] * page_rect.width / img_cv.shape[1], scaled_box[3] * page_rect.height / img_cv.shape[0]
                 )
 
-                result = {'page': page_num, 'bbox': bbox, 'conf': confidence}
+                result = {'page': page_num_0based, 'bbox': bbox, 'conf': confidence}
                 if is_figure: page_figs.append(result)
                 elif is_table: page_tbls.append(result)
 
-            if page_figs: figures_by_page[page_num] = page_figs
-            if page_tbls: tables_by_page[page_num] = page_tbls
+            if page_figs: figures_by_page[page_num_0based] = page_figs
+            if page_tbls: tables_by_page[page_num_0based] = page_tbls
 
             # Update progress after each page is processed
-            progress = int(((page_num + 1) / num_pages) * 95)
+            progress = int(((i + 1) / num_pages_to_process) * 95)
             self.progress_updated.emit(progress)
 
         self.status_changed.emit("推理完成，正在整理和保存结果...")
@@ -310,10 +357,11 @@ class AppLogic(QObject):
                 all_tables.extend(self._sort_detected_objects(tables_by_page[page_num], self.doc[page_num].rect))
 
         target_numbers = self._parse_number_ranges(s["target_numbers"])
-        fig_count = self._save_images(all_figures, s["output_dir"], "fig", s["dpi"], s["padding"], s["output_format"], s["optimize_m3"], target_numbers)
+        pattern = s.get("filename_pattern")
+        fig_count = self._save_images(all_figures, s["output_dir"], "fig", s["dpi"], s["padding"], s["output_format"], s["optimize_m3"], target_numbers, pattern)
         tbl_count = 0
         if s['extract_tables']:
-            tbl_count = self._save_images(all_tables, s["output_dir"], "table", s["dpi"], s["padding"], s["output_format"], s["optimize_m3"], None)
+            tbl_count = self._save_images(all_tables, s["output_dir"], "table", s["dpi"], s["padding"], s["output_format"], s["optimize_m3"], None, pattern)
 
         self.progress_updated.emit(100)
 
@@ -323,7 +371,7 @@ class AppLogic(QObject):
         return f"成功提取了 {fig_count} 张图片和 {tbl_count} 个表格。"
 
 
-    def _save_images(self, objects: List[Dict], output_dir: str, prefix: str, dpi: int, padding: int, out_format: str, optimize: bool, target_numbers: Optional[Set[int]]):
+    def _save_images(self, objects: List[Dict], output_dir: str, prefix: str, dpi: int, padding: int, out_format: str, optimize: bool, target_numbers: Optional[Set[int]], pattern: Optional[str] = None):
         if not objects: return 0
             
         self.status_changed.emit(f"AI模型共检测到 {len(objects)} 个有效{prefix}区域，正在保存...")
@@ -337,7 +385,10 @@ class AppLogic(QObject):
             clip_rect = (bbox + (-padding, -padding, padding, padding)).irect
             pix = self.doc[obj['page']].get_pixmap(clip=clip_rect, dpi=dpi)
             
-            output_path = os.path.join(output_dir, f"{prefix}{idx}.{out_format}")
+            fname = self._generate_filename(pattern, {"type": prefix, "id": idx, "page": obj['page'] + 1, "ext": out_format})
+            if not fname.lower().endswith(f".{out_format}"):
+                fname += f".{out_format}"
+            output_path = os.path.join(output_dir, fname)
             
             img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
             save_options = {}
@@ -348,7 +399,7 @@ class AppLogic(QObject):
             img.save(output_path, format=out_format.upper(), **save_options)
 
             saved_count += 1
-            self.status_changed.emit(f"已保存图片: {prefix}{idx}.{out_format}")
+            self.status_changed.emit(f"已保存图片: {fname}")
 
         self.status_changed.emit(f"成功保存了 {saved_count} 张{prefix}。")
         return saved_count
