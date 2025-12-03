@@ -13,6 +13,7 @@ import onnx
 import onnxruntime
 from PIL import Image
 from PySide6.QtCore import QObject, Signal
+from .xycut import recursive_xy_cut
 
 
 class AppLogic(QObject):
@@ -491,35 +492,39 @@ class AppLogic(QObject):
 
     def _sorted_boxes(self, objects: List[Dict]) -> List[Dict]:
         """
-        Sort boxes in order from top to bottom, left to right, inspired by MinerU.
+        Sort boxes in reading order using Recursive XY Cut (MinerU's algorithm).
         """
         if not objects:
             return []
-
-        # Sort primarily by top coordinate (y0), then by left coordinate (x0)
-        sorted_objects = sorted(objects, key=lambda obj: (obj['bbox'].y0, obj['bbox'].x0))
         
-        # Refine sorting for items on the same line (small y0 difference)
-        i = 0
-        while i < len(sorted_objects) - 1:
-            # Find a group of items on the same "line"
-            line_end_j = i
-            for j in range(i + 1, len(sorted_objects)):
-                # Check if the vertical distance is small enough to be considered the same line
-                if abs(sorted_objects[j]['bbox'].y0 - sorted_objects[i]['bbox'].y0) < 20:
-                    line_end_j = j
-                else:
-                    break
-            
-            # If a line group is found, sort it by x-coordinate
-            if line_end_j > i:
-                line_group = sorted_objects[i : line_end_j + 1]
-                sorted_line_group = sorted(line_group, key=lambda obj: obj['bbox'].x0)
-                sorted_objects[i : line_end_j + 1] = sorted_line_group
-                i = line_end_j + 1
-            else:
-                i += 1
-                
+        # Prepare boxes for XY Cut: [x0, y0, x1, y1]
+        # Ensure coordinates are non-negative integers
+        boxes_list = []
+        for obj in objects:
+            b = obj['bbox']
+            # Use max(0, ...) to avoid negative coords which might break projection
+            boxes_list.append([max(0, int(b.x0)), max(0, int(b.y0)), max(0, int(b.x1)), max(0, int(b.y1))])
+        
+        boxes_np = np.array(boxes_list, dtype=int)
+        indices = np.arange(len(boxes_np))
+        res_indices = []
+
+        try:
+            recursive_xy_cut(boxes_np, indices, res_indices)
+        except Exception as e:
+            print(f"XYCut sorting failed: {e}. Falling back to basic sort.")
+            # Fallback to original simple sort if XYCut fails
+            return sorted(objects, key=lambda obj: (obj['bbox'].y0, obj['bbox'].x0))
+
+        # Reorder objects based on the result indices
+        # If res_indices is shorter than objects (shouldn't happen if logic is correct), handle it?
+        # But recursive_xy_cut should visit all indices.
+        
+        if len(res_indices) != len(objects):
+             print(f"Warning: XYCut returned {len(res_indices)} indices for {len(objects)} objects. Fallback.")
+             return sorted(objects, key=lambda obj: (obj['bbox'].y0, obj['bbox'].x0))
+
+        sorted_objects = [objects[i] for i in res_indices]
         return sorted_objects
 
     def _sort_detected_objects(self, objects: List[Dict], page_rect: fitz.Rect) -> List[Dict]:

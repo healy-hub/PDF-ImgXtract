@@ -1,17 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-PDF内容提取多功能工具 (V38.1 - 逻辑修正与终极优化版)
+PDF内容提取多功能工具 (V38.2 - 引入递归XY Cut排序算法)
 
 功能概述:
 - 模式1: 从PDF中直接提取嵌入的图片对象。
 - 模式2: 将PDF的每一页渲染并保存为图片（支持并行处理）。
 - 模式3: 利用ONNX AI模型（如YOLO）检测并裁剪PDF页面中的特定区域（如图片、表格）。
 
-V38.1 修复日志:
-- 修正了V38.0版本中因过度重构导致的检测逻辑错误。
-- 恢复了精确的类别名称匹配 (==)，避免将 'figure_caption' 误认为 'figure'。
-- 恢复了针对表格的几何形状过滤器（宽高比、面积比）。
-- 恢复了针对表格的特殊置信度阈值逻辑。
+V38.2 更新日志:
+- 引入 MinerU 的 Recursive XY Cut 算法，优化复杂版面（如双栏、跨栏）下的图片/表格排序逻辑。
+- 修复了双栏文档中图片序号混乱的问题 (Column-Major sorting)。
 """
 
 import argparse
@@ -30,18 +28,106 @@ import onnxruntime
 from PIL import Image
 
 # ==============================================================================
+# 算法模块: Recursive XY Cut (Reading Order Sorting)
+# ==============================================================================
+
+def projection_by_bboxes(boxes: np.ndarray, axis: int) -> np.ndarray:
+    """
+    Get projection profile by bounding boxes.
+    Args:
+        boxes: [N, 4] (x1, y1, x2, y2)
+        axis: 0 for X-axis (vertical projection), 1 for Y-axis (horizontal projection)
+    """
+    assert axis in [0, 1]
+    if boxes.size == 0:
+        return np.zeros(0, dtype=int)
+        
+    length = np.max(boxes[:, axis::2])
+    res = np.zeros(length, dtype=int)
+    for start, end in boxes[:, axis::2]:
+        start = max(0, int(start))
+        end = min(length, int(end))
+        if start < end:
+            res[start:end] += 1
+    return res
+
+def split_projection_profile(arr_values: np.ndarray, min_value: float, min_gap: float):
+    """
+    Split projection profile.
+    Returns (start_indices, end_indices) arrays.
+    """
+    arr_index = np.where(arr_values > min_value)[0]
+    if not len(arr_index):
+        return None
+
+    arr_diff = arr_index[1:] - arr_index[0:-1]
+    arr_diff_index = np.where(arr_diff > min_gap)[0]
+    arr_zero_intvl_start = arr_index[arr_diff_index]
+    arr_zero_intvl_end = arr_index[arr_diff_index + 1]
+
+    arr_start = np.insert(arr_zero_intvl_end, 0, arr_index[0])
+    arr_end = np.append(arr_zero_intvl_start, arr_index[-1])
+    arr_end += 1
+
+    return arr_start, arr_end
+
+def recursive_xy_cut(boxes: np.ndarray, indices: List[int], res: List[int]):
+    """
+    Recursive XY Cut algorithm tailored for Document Layout Analysis.
+    Prioritizes Vertical Cuts (Columns) over Horizontal Cuts (Rows) to handle dual-column layouts correctly.
+    
+    Args:
+        boxes: (N, 4) [x1, y1, x2, y2]
+        indices: Original indices of the boxes
+        res: Result list to append sorted indices to
+    """
+    if len(boxes) == 0:
+        return
+
+    # 1. Try splitting by X-axis (Vertical Columns) first
+    x_projection = projection_by_bboxes(boxes, axis=0)
+    pos_x = split_projection_profile(x_projection, 0, 1)
+
+    if pos_x is not None and len(pos_x[0]) > 1:
+        arr_x0, arr_x1 = pos_x
+        for c0, c1 in zip(arr_x0, arr_x1):
+            # Filter boxes that fall significantly into this column range
+            box_centers_x = (boxes[:, 0] + boxes[:, 2]) / 2
+            mask = (box_centers_x >= c0) & (box_centers_x < c1)
+            
+            if np.any(mask):
+                recursive_xy_cut(boxes[mask], indices[mask], res)
+        return
+
+    # 2. If X-split failed (Single Column), try splitting by Y-axis (Rows)
+    y_projection = projection_by_bboxes(boxes, axis=1)
+    pos_y = split_projection_profile(y_projection, 0, 1)
+
+    if pos_y is not None and len(pos_y[0]) > 1:
+        arr_y0, arr_y1 = pos_y
+        for r0, r1 in zip(arr_y0, arr_y1):
+            box_centers_y = (boxes[:, 1] + boxes[:, 3]) / 2
+            mask = (box_centers_y >= r0) & (box_centers_y < r1)
+            
+            if np.any(mask):
+                recursive_xy_cut(boxes[mask], indices[mask], res)
+        return
+
+    # 3. If both splits failed, sort by Top-to-Bottom, then Left-to-Right
+    combined = list(zip(indices, boxes))
+    combined.sort(key=lambda x: (x[1][1], x[1][0]))
+    
+    sorted_indices = [x[0] for x in combined]
+    res.extend(sorted_indices)
+
+
+# ==============================================================================
 # 模块 1 & 2: PDF原生图片提取 和 页面到图片的转换
 # ==============================================================================
 
 def parse_number_ranges(range_string: Optional[str]) -> Optional[Set[int]]:
     """
     解析逗号分隔的数字和范围字符串 (例如 '1,3,5-8')。
-
-    Args:
-        range_string: 用户输入的字符串，如 "1,3,5-8"。
-
-    Returns:
-        一个包含所有指定数字的集合，如果输入为空则返回 None。
     """
     if not range_string:
         return None
@@ -85,6 +171,8 @@ def extract_embedded_images(pdf_path: str, output_dir: str, target_numbers: Opti
         pdf_file.close()
         return
 
+    # 模式1依旧保留简单的排序逻辑，因为它是基于对象流的，不一定完全对应视觉布局
+    # 但为了更准确，也可以按 (page, y, x) 排序
     all_potential_images.sort(key=lambda img: (img["page"], img["bbox"].y0, img["bbox"].x0))
 
     saved_counter = 0
@@ -196,6 +284,9 @@ def _preprocess_image(image: np.ndarray, new_shape: Tuple[int, int], stride: int
 
 
 def _scale_boxes(img1_shape: Tuple[int, int], boxes: np.ndarray, img0_shape: Tuple[int, int], pad_info: Tuple[int, int]) -> np.ndarray:
+    """
+    _scale_boxes function implementation.
+    """
     gain = min(img1_shape[0] / img0_shape[0], img1_shape[1] / img0_shape[1])
     pad_x, pad_y = pad_info
     boxes[..., 0] = (boxes[..., 0] - pad_x) / gain
@@ -256,37 +347,32 @@ def _non_max_suppression(boxes: np.ndarray, scores: np.ndarray, iou_threshold: f
 
 def _sort_detected_objects(objects: List[Dict]) -> List[Dict]:
     """
-    Sorts detected objects based on natural reading order (top-to-bottom, left-to-right).
+    Sorts detected objects based on Recursive XY Cut (Reading Order).
     """
     if not objects:
         return []
 
-    # Sort primarily by top coordinate (y0)
-    sorted_objects = sorted(objects, key=lambda obj: obj['bbox'].y0)
+    # Prepare boxes for XY Cut: [x0, y0, x1, y1]
+    boxes_list = []
+    for obj in objects:
+        b = obj['bbox']
+        boxes_list.append([max(0, int(b.x0)), max(0, int(b.y0)), max(0, int(b.x1)), max(0, int(b.y1))])
     
-    # Refine sorting for items on the same line
-    i = 0
-    while i < len(sorted_objects) - 1:
-        line_end_j = i
-        # Check subsequent items to see if they are on the same line
-        for j in range(i + 1, len(sorted_objects)):
-            # Use a threshold relative to object height to define a "line"
-            line_height_threshold = max(sorted_objects[i]['bbox'].height, sorted_objects[j]['bbox'].height) * 0.5
-            if abs(sorted_objects[j]['bbox'].y0 - sorted_objects[i]['bbox'].y0) < line_height_threshold:
-                line_end_j = j
-            else:
-                break
-        
-        # If a line group is found, sort it by x-coordinate
-        if line_end_j > i:
-            line_group = sorted_objects[i : line_end_j + 1]
-            # Sort the line from left to right
-            sorted_line_group = sorted(line_group, key=lambda obj: obj['bbox'].x0)
-            sorted_objects[i : line_end_j + 1] = sorted_line_group
-            i = line_end_j + 1
-        else:
-            i += 1
-            
+    boxes_np = np.array(boxes_list, dtype=int)
+    indices = np.arange(len(boxes_np))
+    res_indices = []
+
+    try:
+        recursive_xy_cut(boxes_np, indices, res_indices)
+    except Exception as e:
+        print(f"[警告] XYCut 排序失败: {e}。将回退到基础排序。")
+        return sorted(objects, key=lambda obj: (obj['bbox'].y0, obj['bbox'].x0))
+
+    if len(res_indices) != len(objects):
+        print(f"[警告] XYCut 返回的索引数量不匹配 ({len(res_indices)} vs {len(objects)})。将回退到基础排序。")
+        return sorted(objects, key=lambda obj: (obj['bbox'].y0, obj['bbox'].x0))
+
+    sorted_objects = [objects[i] for i in res_indices]
     return sorted_objects
 
 
@@ -343,7 +429,7 @@ def extract_images_ai_yolo(pdf_path: str, output_dir: str, model_path: str, **kw
         model = onnx.load(model_path)
         metadata = {prop.key: prop.value for prop in model.metadata_props}
         stride = ast.literal_eval(metadata.get("stride", "32"))
-        class_names = ast.literal_eval(metadata.get("names", "{}"))
+        class_names = ast.literal_eval(metadata.get("names", "{{}}"))
         print(f"[*] 从模型元数据加载: stride={stride}, classes={class_names}")
     except Exception as e:
         print(f"[错误] 无法加载或解析ONNX模型 '{model_path}': {e}")
@@ -472,8 +558,8 @@ def main():
     parser.add_argument("-i", "--input", required=True, help="输入的PDF文件路径。")
     parser.add_argument("-o", "--output", default="output", help="输出文件夹路径。(默认: 'output')")
     parser.add_argument("--mode", type=int, default=3, choices=[1, 2, 3], 
-                        help="1: 提取嵌入对象\n"
-                             "2: 页面转图片\n"
+                        help="1: 提取嵌入对象\n" 
+                             "2: 页面转图片\n" 
                              "3: AI视觉提取 (默认)")
     # --- 模式 2 & 3 参数 ---
     parser.add_argument("--dpi", type=int, default=300, help="[模式2/3] 裁剪或渲染的分辨率。(默认: 300)")
